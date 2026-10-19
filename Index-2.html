@@ -1,0 +1,965 @@
+ <!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1080px; height: 1920px; overflow: hidden; background: #0a0a0a; }
+  canvas { position: absolute; top: 0; left: 0; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// ============================================================
+// AUDIX SHOWREEL — 15s @ 120BPM
+// Through-line: The red triangle from the Audix "A" logo mark
+// ============================================================
+
+const W = 1080, H = 1920;
+const BPM = 120, SPB = 60 / BPM; // 0.5s per beat
+const TOTAL = 15;
+
+// Brand
+const C = {
+  bg:      '#0a0a0a',
+  white:   '#f5f4f0',
+  red:     '#e63329',
+  mid:     '#1a1a1a',
+  gray:    '#3a3a3a',
+  lgray:   '#8a8a8a',
+};
+
+// ── Easing ──────────────────────────────────────────────────
+function spring(t, tension=180, friction=18, overshoot=1.0) {
+  if (t <= 0) return 0;
+  const w = Math.sqrt(tension);
+  const z = friction / (2 * Math.sqrt(tension));
+  if (z < 1) {
+    const wd = w * Math.sqrt(1 - z*z);
+    return overshoot * (1 - Math.exp(-z*w*t) * (Math.cos(wd*t) + (z*w/wd)*Math.sin(wd*t)));
+  }
+  return 1 - Math.exp(-w*t) * (1 + w*t);
+}
+
+function easeOut(t, p=3) {
+  return 1 - Math.pow(1 - Math.clamp01(t), p);
+}
+
+function easeIn(t, p=3) {
+  return Math.pow(Math.clamp01(t), p);
+}
+
+function expo(t, k=6) {
+  return t <= 0 ? 0 : t >= 1 ? 1 : 1 - Math.exp(-k * t);
+}
+
+Math.clamp01 = t => Math.max(0, Math.min(1, t));
+Math.clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+Math.lerp = (a,b,t) => a + (b-a)*t;
+
+// ── Beat map ────────────────────────────────────────────────
+// beat index → time in seconds
+function beatTime(b) { return b * SPB; }
+
+// ── Main seek function ──────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// Expose globally for Playwright
+window.TOTAL_DURATION = TOTAL;
+window.seek = function(t) {
+  ctx.clearRect(0, 0, W, H);
+  
+  // Background
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Scene dispatcher
+  const beat = t / SPB; // continuous beat index
+
+  // ── Camera state ───────────────────────────────────────────
+  // Camera zoom: accumulates slight push each scene
+  // Never sits still; each scene pushes 1.0 → 1.04
+  let camZoom = getCameraZoom(t);
+  let camX = W/2, camY = H/2;
+
+  // Apply camera transform
+  ctx.save();
+  ctx.translate(camX, camY);
+  ctx.scale(camZoom, camZoom);
+  ctx.translate(-camX, -camY);
+
+  // ── Scene routing ──────────────────────────────────────────
+  if (t < beatTime(2)) {
+    drawHook(ctx, t);
+  } else if (t < beatTime(6)) {
+    drawScene1(ctx, t);
+  } else if (t < beatTime(10)) {
+    drawScene2(ctx, t);
+  } else if (t < beatTime(14)) {
+    drawScene3(ctx, t);
+  } else if (t < beatTime(18)) {
+    drawScene4(ctx, t);
+  } else if (t < beatTime(22)) {
+    drawPayoff(ctx, t);
+  } else {
+    drawEndCard(ctx, t);
+  }
+
+  ctx.restore();
+
+  // Always draw the through-line triangle on top of camera
+  // (it lives in screen space for match cuts)
+  drawTriangle(ctx, t);
+};
+
+// ── Camera zoom ─────────────────────────────────────────────
+function getCameraZoom(t) {
+  // Each scene pushes slowly; discrete steps at scene changes
+  const sceneStarts = [0, beatTime(2), beatTime(6), beatTime(10), beatTime(14), beatTime(18), beatTime(22)];
+  const baseZooms   = [1.00, 1.02, 1.04, 1.06, 1.04, 1.08, 1.00];
+  const endZooms    = [1.04, 1.04, 1.08, 1.08, 1.09, 1.12, 1.00];
+
+  for (let i = sceneStarts.length - 1; i >= 0; i--) {
+    if (t >= sceneStarts[i]) {
+      const localT = (t - sceneStarts[i]);
+      const dur = (i < sceneStarts.length - 1 ? sceneStarts[i+1] : TOTAL) - sceneStarts[i];
+      const p = Math.clamp01(localT / dur);
+      return Math.lerp(baseZooms[i], endZooms[i], expo(p, 2));
+    }
+  }
+  return 1.0;
+}
+
+// ── Triangle state (through-line) ───────────────────────────
+// The red triangle moves through all scenes in screen space
+function getTriangleState(t) {
+  // Returns {x, y, size, rotation, opacity, mode}
+  // mode: 'mark'|'cursor'|'rod'|'point'|'fill'|'logo'
+  
+  if (t < beatTime(1)) {
+    // Hook: triangle enters center, cuts through text
+    const p = Math.clamp01(t / beatTime(1));
+    const s = spring(p * 3, 200, 20, 1.05);
+    return {
+      x: W/2, y: H*0.42,
+      size: Math.lerp(0, 80, s),
+      rotation: 0,
+      opacity: s,
+      mode: 'mark'
+    };
+  } else if (t < beatTime(2)) {
+    // Pulse and camera push
+    const p = Math.clamp01((t - beatTime(1)) / SPB);
+    const pulse = 1 + 0.06 * Math.sin(p * Math.PI);
+    return {
+      x: W/2, y: H*0.42,
+      size: 80 * pulse,
+      rotation: 0,
+      opacity: 1,
+      mode: 'mark'
+    };
+  } else if (t < beatTime(4)) {
+    // Scene 1: morphs to cursor
+    const p = Math.clamp01((t - beatTime(2)) / beatTime(2));
+    const s = spring(Math.clamp01(p * 2), 160, 16, 1.02);
+    return {
+      x: Math.lerp(W/2, W*0.35, s),
+      y: Math.lerp(H*0.42, H*0.45, s),
+      size: Math.lerp(80, 40, s),
+      rotation: Math.lerp(0, -15, s),
+      opacity: 1,
+      mode: 'cursor'
+    };
+  } else if (t < beatTime(6)) {
+    // Scene 1 cont: cursor clicks
+    const p = Math.clamp01((t - beatTime(4)) / beatTime(2));
+    const click = 0.85 + 0.15 * Math.abs(Math.sin(p * Math.PI * 2));
+    return {
+      x: W*0.35, y: H*0.45,
+      size: 40 * click,
+      rotation: -15,
+      opacity: 1,
+      mode: 'cursor'
+    };
+  } else if (t < beatTime(8)) {
+    // Scene 2: cursor drags → trail → grid accent
+    const p = Math.clamp01((t - beatTime(6)) / beatTime(2));
+    const s = spring(p, 140, 15, 1.01);
+    return {
+      x: Math.lerp(W*0.35, W*0.65, s),
+      y: Math.lerp(H*0.45, H*0.38, s),
+      size: 40,
+      rotation: Math.lerp(-15, 45, s),
+      opacity: 1,
+      mode: 'cursor'
+    };
+  } else if (t < beatTime(10)) {
+    // Scene 2 cont: becomes grid diagonal accent
+    const p = Math.clamp01((t - beatTime(8)) / beatTime(2));
+    const s = spring(p, 160, 18);
+    return {
+      x: Math.lerp(W*0.65, W*0.5, s),
+      y: Math.lerp(H*0.38, H*0.5, s),
+      size: Math.lerp(40, 60, s),
+      rotation: Math.lerp(45, 30, s),
+      opacity: 1,
+      mode: 'accent'
+    };
+  } else if (t < beatTime(12)) {
+    // Scene 3: shrinks to point → expands as scatter center
+    const p = Math.clamp01((t - beatTime(10)) / beatTime(2));
+    const s = spring(p, 200, 22, 1.08);
+    const size = p < 0.3
+      ? Math.lerp(60, 4, easeIn(p/0.3))
+      : Math.lerp(4, 55, spring((p-0.3)/0.7, 180, 18));
+    return {
+      x: W/2, y: H/2,
+      size,
+      rotation: Math.lerp(30, 90, expo(p)),
+      opacity: 1,
+      mode: 'point'
+    };
+  } else if (t < beatTime(14)) {
+    // Scene 3 cont: floats with depth
+    const p = Math.clamp01((t - beatTime(12)) / beatTime(2));
+    const bob = Math.sin(p * Math.PI * 2) * 8;
+    return {
+      x: W/2, y: H/2 + bob,
+      size: 55,
+      rotation: 90,
+      opacity: 1,
+      mode: 'accent'
+    };
+  } else if (t < beatTime(16)) {
+    // Scene 4: rotates 90°, becomes horizontal rod
+    const p = Math.clamp01((t - beatTime(14)) / beatTime(2));
+    const s = spring(p, 160, 16, 1.02);
+    return {
+      x: Math.lerp(W/2, W/2, s),
+      y: Math.lerp(H/2, H*0.37, s),
+      size: Math.lerp(55, 30, s),
+      rotation: Math.lerp(90, 180, s),
+      opacity: 1,
+      mode: 'rod-hint'
+    };
+  } else if (t < beatTime(18)) {
+    const p = Math.clamp01((t - beatTime(16)) / beatTime(2));
+    return {
+      x: W/2, y: H*0.37,
+      size: 30,
+      rotation: 180,
+      opacity: 1,
+      mode: 'rod-hint'
+    };
+  } else if (t < beatTime(20)) {
+    // Payoff: flies to center, grows to fill
+    const p = Math.clamp01((t - beatTime(18)) / beatTime(2));
+    const s = spring(p, 300, 20, 1.0);
+    const maxSize = Math.sqrt(W*W + H*H) / 2 * 1.1;
+    return {
+      x: W/2, y: H/2,
+      size: Math.lerp(30, maxSize, easeIn(p, 4)),
+      rotation: Math.lerp(180, 360, expo(p, 4)),
+      opacity: 1,
+      mode: 'fill'
+    };
+  } else if (t < beatTime(22)) {
+    // Payoff resolve → logo assembly
+    const p = Math.clamp01((t - beatTime(20)) / beatTime(2));
+    const s = spring(p, 180, 20);
+    const maxSize = Math.sqrt(W*W + H*H) / 2 * 1.1;
+    return {
+      x: W/2, y: H*0.48,
+      size: Math.lerp(maxSize, 55, easeOut(p, 4)),
+      rotation: 360,
+      opacity: 1,
+      mode: p > 0.5 ? 'logo' : 'fill-recede'
+    };
+  } else {
+    // End card
+    const p = Math.clamp01((t - beatTime(22)) / 2);
+    const blink = Math.floor(t * 4) % 2 === 0 ? 1 : 0.3;
+    return {
+      x: W/2, y: H*0.48,
+      size: 55,
+      rotation: 360,
+      opacity: p > 0.8 ? blink : 1,
+      mode: 'logo'
+    };
+  }
+}
+
+// ── DRAW: Triangle ───────────────────────────────────────────
+function drawTrianglePure(ctx, x, y, size, rotation, opacity, mode) {
+  if (opacity <= 0 || size <= 0) return;
+  if (mode === 'fill' || mode === 'fill-recede') {
+    // Fills entire screen with red
+    ctx.save();
+    ctx.fillStyle = C.red;
+    ctx.globalAlpha = opacity;
+    ctx.beginPath();
+    const s = size;
+    const cx = x, cy = y;
+    const r = rotation * Math.PI / 180;
+    for (let i = 0; i < 3; i++) {
+      const a = r + i * 2 * Math.PI / 3;
+      if (i === 0) ctx.moveTo(cx + s * Math.cos(a), cy + s * Math.sin(a));
+      else ctx.lineTo(cx + s * Math.cos(a), cy + s * Math.sin(a));
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.translate(x, y);
+  ctx.rotate(rotation * Math.PI / 180);
+
+  if (mode === 'cursor') {
+    // Triangle as cursor arrow
+    ctx.fillStyle = C.red;
+    ctx.beginPath();
+    ctx.moveTo(0, -size);
+    ctx.lineTo(-size * 0.5, size * 0.3);
+    ctx.lineTo(0, 0);
+    ctx.lineTo(size * 0.5, size * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // cursor tail
+    ctx.fillStyle = C.white;
+    ctx.fillRect(-2, 0, 4, size * 0.4);
+  } else {
+    // Equilateral triangle (mark, accent, point, rod-hint, logo)
+    ctx.fillStyle = C.red;
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI/2 + i * 2 * Math.PI / 3;
+      if (i === 0) ctx.moveTo(Math.cos(a)*size, Math.sin(a)*size);
+      else ctx.lineTo(Math.cos(a)*size, Math.sin(a)*size);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawTriangle(ctx, t) {
+  const state = getTriangleState(t);
+  drawTrianglePure(ctx, state.x, state.y, state.size, state.rotation, state.opacity, state.mode);
+}
+
+// ── SCENE HELPERS ────────────────────────────────────────────
+
+function setFont(ctx, size, weight='700', family='Arial') {
+  ctx.font = `${weight} ${size}px ${family}`;
+}
+
+// Mask-reveal text (wipes left→right)
+function maskText(ctx, text, x, y, progress, size, color, weight='700', align='center') {
+  if (progress <= 0) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x - (align==='center'?W:0), y - size*1.2, 
+           align==='center'? progress*W*2 : progress*W, size*1.6);
+  ctx.clip();
+  ctx.fillStyle = color;
+  setFont(ctx, size, weight);
+  ctx.textAlign = align;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+// Draw a component card (vectorized)
+function drawCard(ctx, x, y, w, h, label, num, color='#1a1a1a', progress=1, tilt=0) {
+  if (progress <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = progress;
+  ctx.translate(x + w/2, y + h/2);
+  ctx.rotate(tilt);
+  
+  // Card body
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  roundRect(ctx, -w/2, -h/2, w, h, 12);
+  ctx.fill();
+
+  // Card border
+  ctx.strokeStyle = C.gray;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Top label badge
+  if (label) {
+    ctx.fillStyle = C.white;
+    ctx.fillRect(-w/2 + 12, -h/2 + 12, 120, 24);
+    ctx.fillStyle = C.bg;
+    setFont(ctx, 11, '600');
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, -w/2 + 18, -h/2 + 24);
+  }
+
+  // Component number
+  if (num) {
+    ctx.fillStyle = C.lgray;
+    setFont(ctx, 13, '400');
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`#${num}`, -w/2 + 18, -h/2 + 44);
+  }
+
+  // Inner content placeholder (simulated UI lines)
+  ctx.fillStyle = C.gray;
+  for (let i = 0; i < 3; i++) {
+    const lw = [w*0.5, w*0.35, w*0.45][i];
+    ctx.fillRect(-w/2 + 20, h/2 - 70 + i*22, lw, 8);
+  }
+
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h);
+  ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r);
+  ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+// ── HOOK (beats 0-2) ─────────────────────────────────────────
+function drawHook(ctx, t) {
+  const line1t = Math.clamp01(t / 0.3);
+  const line2t = Math.clamp01((t - 0.2) / 0.3);
+
+  // "UI THAT FEELS" — big type
+  const p1 = easeOut(line1t, 2);
+  maskText(ctx, 'UI THAT', W/2, H*0.35, p1, 112, C.white, '900');
+  
+  const p2 = easeOut(line2t, 2);
+  // "FEELS" — the triangle will cut through this
+  const triState = getTriangleState(t);
+  if (t < beatTime(1)) {
+    maskText(ctx, 'FEELS', W/2, H*0.48, p2, 112, C.white, '900');
+  } else {
+    // After beat 1: "ALIVE." replaces "FEELS" 
+    const swapP = Math.clamp01((t - beatTime(1)) / 0.25);
+    // FEELS fades out
+    ctx.save();
+    ctx.globalAlpha = 1 - easeOut(swapP, 2);
+    setFont(ctx, 112, '900');
+    ctx.fillStyle = C.white;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('FEELS', W/2, H*0.48);
+    ctx.restore();
+    // ALIVE. reveals
+    maskText(ctx, 'ALIVE.', W/2, H*0.48, easeOut(swapP, 2), 112, C.white, '900');
+  }
+
+  // Subtext
+  if (t > 0.6) {
+    const sp = Math.clamp01((t - 0.6) / 0.4);
+    maskText(ctx, 'interfaces built to move', W/2, H*0.59, easeOut(sp), 28, C.lgray, '400');
+  }
+}
+
+// ── SCENE 1: Circular Ring Gallery ──────────────────────────
+function drawScene1(ctx, t) {
+  const st = beatTime(2);
+  const lt = t - st;
+  
+  // Background: slight warm tint
+  ctx.fillStyle = '#0f0f0f';
+  ctx.fillRect(0, 0, W, H);
+
+  // Component card grows from center
+  const cardP = spring(Math.clamp01(lt / 0.4), 160, 16, 1.03);
+  const cardW = 820, cardH = 900;
+  const cardX = (W - cardW) / 2;
+  const cardY = H*0.18;
+
+  ctx.save();
+  ctx.globalAlpha = cardP;
+  ctx.translate(W/2, cardY + cardH/2);
+  ctx.scale(cardP * 0.3 + 0.7, cardP * 0.3 + 0.7);
+  ctx.translate(-W/2, -(cardY + cardH/2));
+  drawCard(ctx, cardX, cardY, cardW, cardH, 'Circular Ring Gallery', '114', '#111', 1);
+  ctx.restore();
+
+  // Circular ring of image thumbnails
+  if (lt > 0.2) {
+    const ringP = Math.clamp01((lt - 0.2) / 1.2);
+    const cx = W/2, cy = H*0.52;
+    const radius = 260;
+    const count = 24;
+    for (let i = 0; i < count; i++) {
+      const reveal = Math.clamp01((ringP * count - i) / 1.5);
+      if (reveal <= 0) continue;
+      const angle = (i / count) * Math.PI * 2 - Math.PI/2;
+      const ix = cx + Math.cos(angle) * radius;
+      const iy = cy + Math.sin(angle) * radius;
+      const sz = 48 * reveal;
+
+      ctx.save();
+      ctx.globalAlpha = reveal * 0.9;
+      ctx.translate(ix, iy);
+      ctx.rotate(angle + Math.PI/2);
+      // Thumbnail rect
+      ctx.fillStyle = `hsl(${200 + i*5}, 15%, ${15 + i%3*5}%)`;
+      ctx.beginPath();
+      roundRect(ctx, -sz/2, -sz*0.7, sz, sz*1.4, 4);
+      ctx.fill();
+      // Tiny figure silhouette hint
+      ctx.fillStyle = `hsl(${200+i*5}, 20%, ${30+i%4*5}%)`;
+      ctx.fillRect(-sz*0.2, -sz*0.5, sz*0.4, sz*0.8);
+      ctx.restore();
+    }
+  }
+
+  // Text: "120+ components"
+  if (lt > 1.2) {
+    const tp = easeOut(Math.clamp01((lt - 1.2) / 0.5));
+    maskText(ctx, '120+ components', W/2, H*0.82, tp, 52, C.white, '700');
+    if (lt > 1.5) {
+      const tp2 = easeOut(Math.clamp01((lt - 1.5) / 0.4));
+      maskText(ctx, 'React · Three.js · GSAP · Tailwind', W/2, H*0.88, tp2, 26, C.lgray, '400');
+    }
+  }
+}
+
+// ── SCENE 2: 3D Grid Angled Wave ────────────────────────────
+function drawScene2(ctx, t) {
+  const st = beatTime(6);
+  const lt = t - st;
+  
+  ctx.fillStyle = '#080808';
+  ctx.fillRect(0, 0, W, H);
+
+  // Angled 3D grid of cards — tilt transform
+  const tiltP = spring(Math.clamp01(lt / 0.6), 140, 15, 1.02);
+  const tiltAngle = Math.lerp(0, -0.18, tiltP); // slight perspective lean
+
+  ctx.save();
+  ctx.translate(W/2, H*0.5);
+  // Simulated perspective tilt
+  ctx.transform(1, tiltAngle, 0.05, 1, 0, 0);
+  ctx.translate(-W/2, -H*0.5);
+
+  const cols = 3, rows = 4;
+  const cw = 240, ch = 310, gap = 18;
+  const gridW = cols * cw + (cols-1)*gap;
+  const gridH = rows * ch + (rows-1)*gap;
+  const ox = (W - gridW) / 2 - 30;
+  const oy = H*0.12;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+      const delay = idx * 0.06;
+      const cp = spring(Math.clamp01((lt - delay) / 0.5), 180, 18, 1.02);
+      if (cp <= 0) continue;
+
+      const x = ox + c * (cw + gap);
+      const y = oy + r * (ch + gap);
+      
+      // Wave effect: vertical offset by column
+      const wave = Math.sin(lt * 2 + c * 0.8) * 12 * Math.clamp01(lt - 0.5);
+
+      ctx.save();
+      ctx.globalAlpha = cp;
+      ctx.translate(x + cw/2, y + ch/2 + wave);
+      ctx.scale(0.7 + cp*0.3, 0.7 + cp*0.3);
+      ctx.translate(-x-cw/2, -y-ch/2-wave);
+
+      const hue = 200 + (r*cols+c) * 8;
+      ctx.fillStyle = `hsl(${hue}, 12%, ${10 + (r+c)%3 * 4}%)`;
+      ctx.beginPath();
+      roundRect(ctx, x, y + wave, cw, ch, 10);
+      ctx.fill();
+      ctx.strokeStyle = C.gray;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Figure silhouette in card
+      ctx.fillStyle = `hsl(${hue}, 18%, ${20+(r+c)%4*5}%)`;
+      ctx.fillRect(x+cw*0.25, y+wave+ch*0.1, cw*0.5, ch*0.65);
+      
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+
+  // Text overlay
+  if (lt > 0.8) {
+    const tp = easeOut(Math.clamp01((lt - 0.8) / 0.4));
+    // Italic serif style
+    ctx.save();
+    ctx.font = `italic 700 68px Georgia`;
+    ctx.fillStyle = C.white;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = tp;
+    ctx.fillText('Now unfolds', W - 80, H*0.72);
+    ctx.fillText("eternity's grace", W - 80, H*0.79);
+    ctx.restore();
+  }
+}
+
+// ── SCENE 3: 3D Spatial Image Grid ──────────────────────────
+function drawScene3(ctx, t) {
+  const st = beatTime(10);
+  const lt = t - st;
+  
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, W, H);
+
+  // Scattered cards in depth (simulated z with scale+opacity)
+  const cards = [
+    {x:0.15, y:0.18, z:0.3, sz:110}, {x:0.7, y:0.12, z:0.6, sz:150},
+    {x:0.45, y:0.25, z:0.8, sz:200}, {x:0.2, y:0.45, z:0.4, sz:130},
+    {x:0.75, y:0.38, z:0.5, sz:140}, {x:0.55, y:0.55, z:0.9, sz:220},
+    {x:0.1, y:0.65, z:0.3, sz:100}, {x:0.85, y:0.6, z:0.7, sz:170},
+    {x:0.3, y:0.75, z:0.5, sz:140}, {x:0.65, y:0.8, z:0.4, sz:120},
+    {x:0.48, y:0.88, z:0.6, sz:155}, {x:0.22, y:0.32, z:0.7, sz:165},
+  ];
+
+  // Sort by z for proper depth
+  const sorted = [...cards].sort((a,b) => a.z - b.z);
+
+  sorted.forEach((card, i) => {
+    const delay = i * 0.08;
+    const cp = spring(Math.clamp01((lt - delay) / 0.6), 160, 16, 1.04);
+    if (cp <= 0) return;
+
+    const drift = Math.sin(lt * 0.8 + i * 1.2) * 8 * Math.clamp01(lt - 0.3);
+    const driftY = Math.cos(lt * 0.6 + i * 0.9) * 5 * Math.clamp01(lt - 0.3);
+    const x = card.x * W + drift;
+    const y = card.y * H + driftY;
+    const sz = card.sz * card.z;
+    const alpha = 0.4 + card.z * 0.6;
+
+    ctx.save();
+    ctx.globalAlpha = cp * alpha;
+    ctx.translate(x, y);
+    ctx.scale(cp * 0.5 + 0.5, cp * 0.5 + 0.5);
+
+    // Album-art style card
+    const hue = 200 + i * 25;
+    ctx.fillStyle = `hsl(${hue}, 20%, 15%)`;
+    ctx.beginPath();
+    roundRect(ctx, -sz/2, -sz/2, sz, sz, 6);
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${hue}, 30%, 40%, 0.4)`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Art content hint
+    ctx.fillStyle = `hsl(${hue+20}, 25%, 25%)`;
+    ctx.fillRect(-sz*0.35, -sz*0.35, sz*0.7, sz*0.7);
+
+    ctx.restore();
+  });
+
+  // Text
+  if (lt > 0.9) {
+    const tp = easeOut(Math.clamp01((lt-0.9)/0.4));
+    maskText(ctx, 'Drag. Fly. Explore.', W/2, H*0.91, tp, 48, C.white, '700');
+  }
+}
+
+// ── SCENE 4: Clothes Rack ───────────────────────────────────
+function drawScene4(ctx, t) {
+  const st = beatTime(14);
+  const lt = t - st;
+
+  ctx.fillStyle = '#f5f4f0';
+  ctx.fillRect(0, 0, W, H);
+
+  // Header
+  ctx.save();
+  setFont(ctx, 52, '900');
+  ctx.fillStyle = C.bg;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('AUDIX', W/2, H*0.14);
+  ctx.restore();
+
+  ctx.save();
+  setFont(ctx, 18, '400');
+  ctx.fillStyle = C.lgray;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('INTERACTIVE CLOTHES RACK STUDIO', W/2, H*0.175);
+  ctx.restore();
+
+  // The rod (horizontal bar) — drawn by through-line becoming it
+  const rodP = spring(Math.clamp01(lt / 0.3), 200, 18);
+  ctx.save();
+  ctx.globalAlpha = rodP;
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(W*0.12, H*0.28 - 4, W*0.76 * rodP, 8);
+  // Rod ends (circles)
+  ctx.beginPath();
+  ctx.arc(W*0.12, H*0.28, 10, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(W*0.12 + W*0.76*rodP, H*0.28, 10, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // Garments hanging on rod
+  const garments = [
+    {name:'Floral Dress', num:'01', color:'#e8ddd0', accent:'#c4a882'},
+    {name:'Essential Tee', num:'02', color:'#1a1a1a', accent:'#333'},
+    {name:'Red Parka', num:'03', color:'#c0392b', accent:'#922b21'},
+    {name:'Monkey King Tee', num:'04', color:'#c4a876', accent:'#a0845e'},
+    {name:'Slate Trouser', num:'05', color:'#4a4a52', accent:'#3a3a40'},
+    {name:'Cream Hoodie', num:'06', color:'#e8e4dc', accent:'#6b6b5e'},
+  ];
+
+  garments.forEach((g, i) => {
+    const delay = i * 0.12;
+    const gp = spring(Math.clamp01((lt - delay - 0.2) / 0.5), 150, 14, 1.04);
+    if (gp <= 0) return;
+
+    const gx = W * (0.17 + i * 0.136);
+    const rodY = H*0.28;
+    const hangLen = H * 0.42 * gp;
+    const swing = Math.sin(lt * 1.5 + i * 0.5) * 6 * Math.max(0, 1 - lt * 0.8);
+
+    ctx.save();
+    ctx.translate(gx + swing, 0);
+    ctx.globalAlpha = gp;
+
+    // Hanger hook
+    ctx.strokeStyle = '#888';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(0, rodY);
+    ctx.quadraticCurveTo(0, rodY + 20, 0, rodY + 35);
+    ctx.stroke();
+
+    // Hanger body
+    ctx.beginPath();
+    ctx.moveTo(-32, rodY + 55);
+    ctx.quadraticCurveTo(0, rodY + 38, 32, rodY + 55);
+    ctx.strokeStyle = '#a0845e';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Garment body (simplified vector shape)
+    const gTop = rodY + 58;
+    const gBot = gTop + hangLen * 0.85;
+    const gW = 58 + (i===0?10:0); // dress slightly wider
+
+    ctx.fillStyle = g.color;
+    ctx.beginPath();
+    ctx.moveTo(-gW*0.45, gTop);
+    ctx.lineTo(-gW*0.5, gTop + 20);
+    ctx.lineTo(-gW*0.5, gBot);
+    ctx.lineTo(gW*0.5, gBot);
+    ctx.lineTo(gW*0.5, gTop + 20);
+    ctx.lineTo(gW*0.45, gTop);
+    ctx.closePath();
+    ctx.fill();
+
+    // Fabric texture hint
+    ctx.fillStyle = g.accent;
+    ctx.globalAlpha = gp * 0.4;
+    for (let j = 0; j < 4; j++) {
+      ctx.fillRect(-gW*0.3, gTop + 30 + j*40, gW*0.6, 2);
+    }
+
+    // Number label
+    ctx.globalAlpha = gp;
+    ctx.fillStyle = C.lgray;
+    setFont(ctx, 20, '400');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(g.num, 0, gBot + 16);
+
+    ctx.restore();
+  });
+
+  // Highlighted name for #04 (center/featured)
+  if (lt > 0.9) {
+    const tp = easeOut(Math.clamp01((lt-0.9)/0.4));
+    ctx.save();
+    ctx.globalAlpha = tp;
+    setFont(ctx, 22, '600');
+    ctx.fillStyle = C.bg;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Monkey King Tee', W/2, H*0.82);
+    setFont(ctx, 16, '400');
+    ctx.fillStyle = C.lgray;
+    ctx.fillText('Graphic T-Shirt', W/2, H*0.855);
+    ctx.restore();
+  }
+
+  // Bottom instruction text
+  if (lt > 1.2) {
+    const tp = easeOut(Math.clamp01((lt-1.2)/0.4));
+    maskText(ctx, '● HOVER TO REVEAL  ●  CLICK TO EXPLORE', W/2, H*0.93, tp, 18, C.lgray, '400');
+  }
+
+  // Payoff text
+  if (lt > 1.5) {
+    const tp = easeOut(Math.clamp01((lt-1.5)/0.4));
+    maskText(ctx, 'Every detail ships.', W/2, H*0.88, tp, 42, C.bg, '700');
+  }
+}
+
+// ── PAYOFF ───────────────────────────────────────────────────
+function drawPayoff(ctx, t) {
+  const st = beatTime(18);
+  const lt = t - st;
+  
+  // 2×2 tile of all four component UIs
+  const tileP = spring(Math.clamp01(lt / 0.4), 180, 18, 1.02);
+  
+  const tiles = [
+    {label:'Ring Gallery', col:'#111', bg:'#0a0a0a'},
+    {label:'3D Wave Grid', col:'#0d0d10', bg:'#080808'},
+    {label:'Spatial Grid', col:'#050507', bg:'#050505'},
+    {label:'Clothes Rack', col:'#eeeee8', bg:'#f5f4f0'},
+  ];
+
+  const tw = W/2, th = H/2;
+  tiles.forEach((tile, i) => {
+    const tx = (i%2) * tw;
+    const ty = Math.floor(i/2) * th;
+    
+    ctx.save();
+    ctx.globalAlpha = tileP;
+    ctx.translate(tx + tw/2, ty + th/2);
+    ctx.scale(0.7 + tileP*0.3, 0.7 + tileP*0.3);
+    ctx.translate(-tw/2, -th/2);
+
+    ctx.fillStyle = tile.bg;
+    ctx.fillRect(0, 0, tw, th);
+
+    // Mini card inside
+    ctx.fillStyle = tile.col;
+    ctx.beginPath();
+    roundRect(ctx, tw*0.1, th*0.1, tw*0.8, th*0.8, 8);
+    ctx.fill();
+
+    ctx.fillStyle = i === 3 ? C.bg : C.white;
+    setFont(ctx, 18, '600');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(tile.label, tw/2, th*0.88);
+
+    ctx.restore();
+  });
+
+  // Grid lines
+  ctx.save();
+  ctx.globalAlpha = tileP * 0.3;
+  ctx.strokeStyle = C.gray;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(W/2, 0); ctx.lineTo(W/2, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+  ctx.restore();
+}
+
+// ── END CARD ─────────────────────────────────────────────────
+function drawEndCard(ctx, t) {
+  const st = beatTime(22);
+  const lt = t - st;
+
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Logo: "AUDIX" with the red triangle as the A crossbar
+  const logoP = spring(Math.clamp01(lt / 0.6), 160, 18, 1.02);
+  const logoY = H*0.44;
+  const logoSize = 140;
+
+  ctx.save();
+  ctx.globalAlpha = logoP;
+  ctx.translate(W/2, logoY);
+  ctx.scale(0.85 + logoP*0.15, 0.85 + logoP*0.15);
+  ctx.translate(-W/2, -logoY);
+
+  // The A with red triangle cutout
+  setFont(ctx, logoSize, '900');
+  ctx.fillStyle = C.white;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('AUDIX', W/2, logoY);
+
+  // Red triangle overlay (the logo mark, placed over the A)
+  const aWidth = ctx.measureText('A').width;
+  const aLeft = W/2 - ctx.measureText('AUDIX').width/2;
+  
+  ctx.fillStyle = C.red;
+  ctx.beginPath();
+  // Triangle that forms the A's crossbar cut
+  ctx.moveTo(aLeft + aWidth*0.18, logoY + logoSize*0.08);
+  ctx.lineTo(aLeft + aWidth*0.5, logoY - logoSize*0.28);
+  ctx.lineTo(aLeft + aWidth*0.82, logoY + logoSize*0.08);
+  ctx.closePath();
+  ctx.fill();
+
+  // The inner A cutout to make it look like the real logo
+  ctx.fillStyle = C.bg;
+  ctx.beginPath();
+  ctx.moveTo(aLeft + aWidth*0.3, logoY + logoSize*0.05);
+  ctx.lineTo(aLeft + aWidth*0.5, logoY - logoSize*0.18);
+  ctx.lineTo(aLeft + aWidth*0.7, logoY + logoSize*0.05);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+
+  // Tagline
+  if (lt > 0.5) {
+    const tp = easeOut(Math.clamp01((lt - 0.5) / 0.5));
+    maskText(ctx, 'Build interfaces that feel truly alive.', W/2, H*0.56, tp, 28, C.lgray, '400');
+  }
+
+  // CTA
+  if (lt > 0.9) {
+    const tp = easeOut(Math.clamp01((lt - 0.9) / 0.5));
+    ctx.save();
+    ctx.globalAlpha = tp;
+    // Button
+    ctx.fillStyle = C.white;
+    ctx.beginPath();
+    roundRect(ctx, W/2 - 160, H*0.63, 320, 64, 32);
+    ctx.fill();
+    setFont(ctx, 24, '700');
+    ctx.fillStyle = C.bg;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('See Components →', W/2, H*0.63 + 32);
+    ctx.restore();
+  }
+
+  // Domain hint
+  if (lt > 1.2) {
+    const tp = easeOut(Math.clamp01((lt - 1.2) / 0.5));
+    maskText(ctx, 'audix.dev', W/2, H*0.73, tp, 22, C.gray, '400');
+  }
+}
+
+// ── AUTO-PLAY (for Playwright detection) ────────────────────
+window.seek(0);
+console.log('AUDIX SHOWREEL READY');
+</script>
+</body>
+</html>
